@@ -1,0 +1,41 @@
+---
+name: Release
+on:
+  push:
+    tags:
+      - 'v*'
+permissions: {}
+jobs:
+  release:
+    permissions:
+      contents: write  # Create and publish GitHub release
+      packages: write  # Push images to GHCR
+      id-token: write  # OIDC for cosign signing
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Create draft release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release create -R "${GITHUB_REPOSITORY}" --draft --generate-notes "${GITHUB_REF_NAME}"
+
+      - name: Push images
+        uses: rancher/ecm-distro-tools/actions/publish-image@78200fd8a88164c175c04d311871e8a75809be66 # master 2026-04-06
+        with:
+          image: cowboy
+          tag: ${{ github.ref_name }}
+          platforms: linux/amd64,linux/arm64
+          push-to-public: false
+
+          prime-registry: ghcr.io
+          prime-repo: rancherlabs
+          prime-username: ${{ github.actor }}
+          prime-password: ${{ secrets.GITHUB_TOKEN }}
+          prime-make-target: push-prime-image
+
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release edit -R "${GITHUB_REPOSITORY}" "${GITHUB_REF_NAME}" --draft=false
