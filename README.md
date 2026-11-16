@@ -172,16 +172,24 @@ Cowboy uses the following key dependencies:
 | Input | Required | Default | Description |
 |-------|----------|---------|-------------|
 | `log-file-path` | Yes | - | Path to the Rancher log dump file to process |
-| `output-file` | No | `<input-basename>_dump.zip` | Output ZIP file name |
-| `upload-artifact` | No | `true` | Upload the generated ZIP as a GitHub Actions artifact |
-| `artifact-retention-days` | No | `30` | Number of days to retain the artifact (1-90) |
+| `output-file` | No | `<input-basename>_dump` | Output directory name |
+| `upload-artifact` | No | `true` | Upload the generated directory as a GitHub Actions artifact |
+| `artifact-retention-days` | No | `7` | Number of days to retain the artifact (1-90) |
+| `artifact-name` | No | `cowboy-log-dump` | Artifact name. Contents are nested under a top-level directory of the same name |
+| `metadata` | No | `{}` | JSON object merged into the generated `metadata.json` (e.g. the caller's matrix) |
+| `image` | No | `latest` | Cowboy container image to run |
+
+Every output directory contains a `metadata.json` with the run id, run attempt, attempt URL, job,
+workflow, event, ref, sha and runner, plus anything passed via `metadata`.
 
 ### Outputs
 
 | Output | Description |
 |--------|-------------|
-| `output-path` | Path to the generated ZIP file |
+| `output-path` | Path to the generated directory |
 | `artifact-name` | Name of the uploaded artifact (if upload-artifact is true) |
+| `artifact-id` | ID of the uploaded artifact (if upload-artifact is true) |
+| `artifact-url` | Download URL of the uploaded artifact (if upload-artifact is true) |
 
 ### Example Workflows
 

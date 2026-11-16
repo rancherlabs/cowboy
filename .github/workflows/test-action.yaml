@@ -16,7 +16,7 @@ jobs:
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
       - name: Build Docker image
-        run: docker build -t ghcr.io/rancherlabs/cowboy:latest .
+        run: docker build -t cowboy:test .
 
       - name: Extract test data
         run: |
@@ -27,6 +27,8 @@ jobs:
         uses: ./
         with:
           log-file-path: testdata/test_logs.txt
+          image: cowboy:test
+          metadata: '{"suite": "test"}'
 
       - name: Verify output file exists
         run: |
@@ -36,6 +38,7 @@ jobs:
             exit 1
           fi
           ls -lRh test_logs_dump/
+          jq -e '.suite == "test" and (.run_attempt | type == "number")' test_logs_dump/metadata.json
 
       - name: Download and verify artifact
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
@@ -45,7 +48,7 @@ jobs:
 
       - name: Verify downloaded artifact
         run: |
-          if [[ ! -d "downloaded-artifact/rancher_logs/" ]]; then
+          if [[ ! -d "downloaded-artifact/cowboy-log-dump/rancher_logs/" ]]; then
             ls -l downloaded-artifact
             echo "Error: Downloaded artifact not found"
             exit 1
@@ -59,6 +62,7 @@ jobs:
           log-file-path: testdata/test_logs.txt
           output-file: custom_output
           upload-artifact: 'false'
+          image: cowboy:test
 
       - name: Verify custom output directory exists
         run: |

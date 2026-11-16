@@ -21,9 +21,21 @@ inputs:
     required: false
     default: '7'
   artifact-name:
-    description: Name of the uploaded artifact
+    description: >-
+      Name of the uploaded artifact. The artifact's contents are nested under a top-level
+      directory of the same name, so files stay attributable after a merged download.
     required: false
     default: 'cowboy-log-dump'
+  metadata:
+    description: >-
+      Optional JSON object merged into the generated metadata.json, such as the caller's toJSON(matrix).
+      Keys provided here override the defaults collected from the github context.
+    required: false
+    default: '{}'
+  image:
+    description: Cowboy container image to run
+    required: false
+    default: 'ghcr.io/rancherlabs/cowboy:latest'
 
 outputs:
   output-path:
@@ -32,19 +44,28 @@ outputs:
   artifact-name:
     description: Name of the uploaded artifact (if upload-artifact is true)
     value: ${{ inputs.artifact-name }}
+  artifact-id:
+    description: ID of the uploaded artifact (if upload-artifact is true)
+    value: ${{ steps.upload.outputs.artifact-id }}
+  artifact-url:
+    description: Download URL of the uploaded artifact (if upload-artifact is true)
+    value: ${{ steps.upload.outputs.artifact-url }}
 
 runs:
   using: composite
   steps:
     - name: Validate inputs
       shell: bash
+      env:
+        INPUT_FILE: ${{ inputs.log-file-path }}
+        RETENTION_DAYS: ${{ inputs.artifact-retention-days }}
+        METADATA: ${{ inputs.metadata }}
       run: |
-        if [[ ! -f "${{ inputs.log-file-path }}" ]]; then
-          echo "::error::Log file not found: ${{ inputs.log-file-path }}"
+        if [[ ! -f "$INPUT_FILE" ]]; then
+          echo "::error::Log file not found: $INPUT_FILE"
           exit 1
         fi
-        
-        RETENTION_DAYS="${{ inputs.artifact-retention-days }}"
+
         if [[ "$RETENTION_DAYS" =~ ^[0-9]+$ ]]; then
           if [[ "$RETENTION_DAYS" -lt 1 || "$RETENTION_DAYS" -gt 90 ]]; then
             echo "::error::artifact-retention-days must be between 1 and 90, got: $RETENTION_DAYS"
@@ -55,17 +76,23 @@ runs:
           exit 1
         fi
 
+        METADATA_TYPE="$(echo "$METADATA" | jq -r 'type' 2>/dev/null)"
+        if [[ "$METADATA_TYPE" != "object" ]]; then
+          echo "::error::metadata must be a JSON object, got: $METADATA"
+          exit 1
+        fi
+
     - name: Calculate output filename
       id: filename
       shell: bash
+      env:
+        INPUT_FILE: ${{ inputs.log-file-path }}
+        OUTPUT_FILE: ${{ inputs.output-file }}
       run: |
-        INPUT_FILE="${{ inputs.log-file-path }}"
-        INPUT_BASENAME=$(basename "$INPUT_FILE" | sed 's/\.[^.]*$//')
-
-        if [[ -n "${{ inputs.output-file }}" ]]; then
-          OUTPUT_FILE="${{ inputs.output-file }}"
-        else
-          OUTPUT_FILE="${INPUT_BASENAME}_dump"
+        if [[ -z "$OUTPUT_FILE" ]]; then
+          INPUT_NAME="$(basename "$INPUT_FILE")"
+          INPUT_NAME_WITHOUT_EXTENSION="$(echo "$INPUT_NAME" | sed -E 's/\.[^.]*$//')"
+          OUTPUT_FILE="${INPUT_NAME_WITHOUT_EXTENSION}_dump"
         fi
 
         echo "output-file=$OUTPUT_FILE" >> "$GITHUB_OUTPUT"
@@ -74,26 +101,28 @@ runs:
     - name: Process log dump
       id: process
       shell: bash
+      env:
+        INPUT_FILE: ${{ inputs.log-file-path }}
+        OUTPUT_FILE: ${{ steps.filename.outputs.output-file }}
+        IMAGE: ${{ inputs.image }}
+        WORKSPACE: ${{ github.workspace }}
       run: |
-        OUTPUT_FILE="${{ steps.filename.outputs.output-file }}"
-        INPUT_FILE="${{ inputs.log-file-path }}"
-
         # Convert paths to absolute if they're relative
         if [[ ! "$INPUT_FILE" = /* ]]; then
-          INPUT_FILE="${{ github.workspace }}/$INPUT_FILE"
+          INPUT_FILE="$WORKSPACE/$INPUT_FILE"
         fi
         if [[ ! "$OUTPUT_FILE" = /* ]]; then
-          OUTPUT_FILE="${{ github.workspace }}/$OUTPUT_FILE"
+          OUTPUT_FILE="$WORKSPACE/$OUTPUT_FILE"
         fi
 
         # Run cowboy container with the input file (without zipping)
         docker run --rm \
-          -v "${{ github.workspace }}:/workspace" \
+          -v "$WORKSPACE:/workspace" \
           -w /workspace \
-          -u $(id -u):$(id -g) \
-          ghcr.io/rancherlabs/cowboy:latest \
-          -input "$(realpath --relative-to="${{ github.workspace }}" "$INPUT_FILE")" \
-          -output "$(realpath --relative-to="${{ github.workspace }}" "$OUTPUT_FILE")" \
+          -u "$(id -u):$(id -g)" \
+          "$IMAGE" \
+          -input "$(realpath --relative-to="$WORKSPACE" "$INPUT_FILE")" \
+          -output "$(realpath --relative-to="$WORKSPACE" "$OUTPUT_FILE")" \
           -no-zip
 
         # Verify the output was created
@@ -103,16 +132,77 @@ runs:
         fi
 
         # Output relative to workspace for consistency
-        RELATIVE_OUTPUT=$(realpath --relative-to="${{ github.workspace }}" "$OUTPUT_FILE")
+        RELATIVE_OUTPUT=$(realpath --relative-to="$WORKSPACE" "$OUTPUT_FILE")
         echo "output-path=$RELATIVE_OUTPUT" >> "$GITHUB_OUTPUT"
         echo "Successfully generated: $RELATIVE_OUTPUT"
+
+    - name: Write metadata
+      shell: bash
+      env:
+        OUTPUT_PATH: ${{ steps.process.outputs.output-path }}
+        METADATA: ${{ inputs.metadata }}
+        ARTIFACT_NAME: ${{ inputs.artifact-name }}
+        LOG_FILE: ${{ inputs.log-file-path }}
+        JOB: ${{ github.job }}
+        RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}/attempts/${{ github.run_attempt }}
+      run: |
+        METADATA_FILE="$OUTPUT_PATH/metadata.json"
+
+        # Keys in the caller's metadata replace the defaults of the same name.
+        jq -n \
+          --arg artifact_name "$ARTIFACT_NAME" \
+          --arg log_file "$LOG_FILE" \
+          --arg repository "$GITHUB_REPOSITORY" \
+          --arg workflow "$GITHUB_WORKFLOW" \
+          --arg job "$JOB" \
+          --argjson run_id "$GITHUB_RUN_ID" \
+          --argjson run_attempt "$GITHUB_RUN_ATTEMPT" \
+          --arg run_url "$RUN_URL" \
+          --arg event "$GITHUB_EVENT_NAME" \
+          --arg ref "$GITHUB_REF" \
+          --arg sha "$GITHUB_SHA" \
+          --arg runner_name "$RUNNER_NAME" \
+          --arg created_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+          --argjson caller_metadata "$METADATA" \
+          '{
+            artifact_name: $artifact_name,
+            log_file: $log_file,
+            repository: $repository,
+            workflow: $workflow,
+            job: $job,
+            run_id: $run_id,
+            run_attempt: $run_attempt,
+            run_url: $run_url,
+            event: $event,
+            ref: $ref,
+            sha: $sha,
+            runner_name: $runner_name,
+            created_at: $created_at
+          } + $caller_metadata' \
+          > "$METADATA_FILE"
+
+        cat "$METADATA_FILE"
+
+    # upload-artifact strips the common root of the uploaded paths, so stage the output under a
+    # directory named after the artifact to keep that name on every file in the archive.
+    - name: Stage artifact
+      id: stage
+      if: inputs.upload-artifact == 'true'
+      shell: bash
+      env:
+        OUTPUT_PATH: ${{ steps.process.outputs.output-path }}
+        ARTIFACT_NAME: ${{ inputs.artifact-name }}
+      run: |
+        STAGE_DIR="$(mktemp -d "$RUNNER_TEMP/cowboy-XXXXXX")"
+        cp -R "$OUTPUT_PATH" "$STAGE_DIR/$ARTIFACT_NAME"
+        echo "path=$STAGE_DIR" >> "$GITHUB_OUTPUT"
 
     - name: Upload artifact
       id: upload
       if: inputs.upload-artifact == 'true'
-      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
       with:
         name: ${{ inputs.artifact-name }}
-        path: ${{ steps.process.outputs.output-path }}
+        path: ${{ steps.stage.outputs.path }}
         retention-days: ${{ inputs.artifact-retention-days }}
         if-no-files-found: error
